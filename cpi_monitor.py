@@ -206,27 +206,26 @@ def main():
     st.title("📊 CPI 通脹監控儀表板")
     st.caption("監控美國消費者物價指數，實時解讀對聯儲局政策及 NQ/ES 期貨的影響")
 
+    # ── 從 Streamlit Secrets 讀取 FRED Key ───────────────────────────────────
+    try:
+        fred_key = st.secrets["FRED_API_KEY"]
+    except (KeyError, FileNotFoundError):
+        st.error("⚠️ 找不到 FRED API Key，請在 `.streamlit/secrets.toml` 加入：\n\n```\nFRED_API_KEY = \"你的key\"\n```")
+        st.stop()
+
     # ── 側邊欄設定 ────────────────────────────────────────────────────────────
     with st.sidebar:
         st.header("⚙️ 設定")
-        fred_key = st.text_input(
-            "FRED API Key",
-            type="password",
-            help="免費申請：https://fred.stlouisfed.org/docs/api/api_key.html"
-        )
+        st.success("✅ FRED API Key 已從 Secrets 載入")
         st.divider()
         st.subheader("Telegram 通知（選填）")
-        tg_token   = st.text_input("Bot Token", type="password")
-        tg_chat_id = st.text_input("Chat ID")
+        tg_token   = st.secrets.get("TG_BOT_TOKEN", "") or st.text_input("Bot Token", type="password")
+        tg_chat_id = st.secrets.get("TG_CHAT_ID", "")  or st.text_input("Chat ID")
         st.divider()
         st.subheader("閾值設定")
         hot_thresh  = st.number_input("偏熱閾值（核心CPI月率%）", value=0.3, step=0.05, format="%.2f")
         cool_thresh = st.number_input("偏冷閾值（核心CPI月率%）", value=0.2, step=0.05, format="%.2f")
         auto_refresh = st.toggle("自動刷新（5分鐘）", value=False)
-
-    if not fred_key:
-        st.info("👈 請在左側輸入 FRED API Key 開始監控\n\n免費申請：https://fred.stlouisfed.org/docs/api/api_key.html")
-        st.stop()
 
     # ── 即時時鐘 ──────────────────────────────────────────────────────────────
     now_et = datetime.now(timezone.utc)
@@ -352,6 +351,109 @@ def main():
     > **今日重點（2026年4月CPI）：** 市場預期整體 +3.7% YoY，核心 +0.3% MoM。  
     > 若核心突破 0.3%，代表高油價（伊朗戰爭）已滲透至非能源品類，聯儲局壓力增大。
     """)
+
+    st.divider()
+
+    # ── AI Prompt 生成器 ──────────────────────────────────────────────────────
+    st.subheader("🤖 問 Claude AI 深入分析")
+    st.caption("根據最新 CPI 數據自動生成 prompt，複製後貼到 Claude 即可獲得深度解讀")
+
+    if not core_mom_df.empty and not headline_mom_df.empty:
+        # 收集最新數據
+        core_val     = core_mom_df.iloc[-1]["value"]
+        headline_val = headline_mom_df.iloc[-1]["value"]
+        core_yoy_val = data["core_cpi"]["yoy"].iloc[-1]["value"] if not data["core_cpi"]["yoy"].empty else "N/A"
+        hl_yoy_val   = data["headline_cpi"]["yoy"].iloc[-1]["value"] if not data["headline_cpi"]["yoy"].empty else "N/A"
+        energy_val   = data["energy_cpi"]["mom"].iloc[-1]["value"] if not data["energy_cpi"]["mom"].empty else "N/A"
+        food_val     = data["food_cpi"]["mom"].iloc[-1]["value"] if not data["food_cpi"]["mom"].empty else "N/A"
+        data_month   = core_mom_df.iloc[-1]["date"].strftime("%Y年%m月")
+        signal_text, _, impact_text = interpret_core(core_val)
+
+        # 三種 prompt 模板
+        prompt_options = {
+            "📊 基本解讀（適合快速判斷）": f"""以下是美國{data_month} CPI 數據，請用繁體中文分析對 NQ（納斯達克100期貨）及 ES（標普500期貨）的短期影響：
+
+【數據】
+- 整體CPI 月率：{headline_val:.2f}%
+- 整體CPI 按年：{hl_yoy_val:.2f}%
+- 核心CPI 月率：{core_val:.2f}%（剔除食品及能源）
+- 核心CPI 按年：{core_yoy_val:.2f}%
+- 能源CPI 月率：{energy_val if isinstance(energy_val, str) else f"{energy_val:.2f}%"}
+- 食品CPI 月率：{food_val if isinstance(food_val, str) else f"{food_val:.2f}%"}
+
+【背景】美伊戰爭令油價高企，市場預期整體CPI +3.7% YoY。今日 NQ 期貨開市前已跌約 -0.79%。
+
+請分析：
+1. 數據是否偏熱/偏冷？
+2. 對聯儲局下次議息決定的影響？
+3. NQ 及 ES 今日可能的走勢方向？
+4. 建議的交易策略（方向、進場時機）""",
+
+            "🔍 深度宏觀分析（適合研究）": f"""請以機構投資者視角，用繁體中文深度分析美國{data_month} CPI 報告：
+
+【原始數據】
+整體CPI MoM: {headline_val:.2f}% | YoY: {hl_yoy_val:.2f}%
+核心CPI MoM: {core_val:.2f}% | YoY: {core_yoy_val:.2f}%
+能源CPI MoM: {energy_val if isinstance(energy_val, str) else f"{energy_val:.2f}%"}
+食品CPI MoM: {food_val if isinstance(food_val, str) else f"{food_val:.2f}%"}
+
+【宏觀背景】
+- 美伊戰爭持續，霍爾木茲海峽受阻，油價在 $100+ 水平
+- 上週五就業報告偏強
+- 市場已連升六週，S&P 500 及 NQ 均處歷史高位
+- 特朗普今日訪問中國，與習近平會面
+
+請分析：
+1. 通脹結構拆解：能源傳導效應有多大？
+2. 聯儲局政策路徑：2026年底前減息幾次？
+3. 債券市場反應（10年期國債）
+4. 科技股（NQ重倉股）估值重估風險
+5. 未來1個月最可能的市場情景及概率""",
+
+            "⚡ TSLA 交易訊號（適合即日操作）": f"""CPI 數據剛公佈（{data_month}），請用繁體中文給出 TSLA 今日交易建議：
+
+【CPI 數據】
+核心CPI 月率：{core_val:.2f}%（閾值：>0.3%偏熱 / ≤0.2%偏冷）
+整體CPI 月率：{headline_val:.2f}%
+訊號判斷：{signal_text}
+市場影響：{impact_text}
+
+【TSLA 背景】
+- Elon Musk 今日隨特朗普訪問中國
+- TSLA 對利率敏感（成長股）
+- NQ 期貨今早跌 -0.79%
+
+請給出：
+1. CPI 對 TSLA 的直接影響（利率敏感度）
+2. Musk 訪華的潛在催化劑
+3. 今日交易方向建議（做多/做空/觀望）
+4. 具體進場價、止損位、目標位
+5. 最大風險因素"""
+        }
+
+        selected_template = st.radio(
+            "選擇 Prompt 模板",
+            list(prompt_options.keys()),
+            horizontal=False
+        )
+
+        prompt_text = prompt_options[selected_template]
+
+        st.text_area(
+            "📋 生成的 Prompt（全選複製後貼到 Claude）",
+            value=prompt_text,
+            height=280,
+            help="Ctrl+A 全選 → Ctrl+C 複製"
+        )
+
+        # 數據摘要小卡
+        col_s1, col_s2, col_s3 = st.columns(3)
+        col_s1.metric("核心CPI 月率", f"{core_val:.2f}%", f"{'🔴偏熱' if core_val > 0.3 else '🟢偏冷' if core_val <= 0.2 else '🟡中性'}")
+        col_s2.metric("整體CPI 月率", f"{headline_val:.2f}%")
+        col_s3.metric("能源CPI 月率", f"{energy_val:.2f}%" if not isinstance(energy_val, str) else energy_val)
+
+    else:
+        st.info("數據載入後將自動生成 AI Prompt")
 
     # ── 自動刷新 ──────────────────────────────────────────────────────────────
     if auto_refresh:
